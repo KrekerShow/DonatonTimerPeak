@@ -15,8 +15,11 @@ DA_TOKEN = os.getenv("DA_TOKEN", "").strip() or (
 
 API_BASE = "https://www.donationalerts.com/api/v1"
 CENTRIFUGO_WS = "wss://centrifugo.donationalerts.com/connection/websocket"
-RUB_PER_STEP = 1000
-SECONDS_PER_STEP = 5 * 60
+
+# === НОВЫЕ НАСТРОЙКИ: 500 ₽ = 2.5 минуты
+RUB_PER_STEP = 500
+SECONDS_PER_STEP = 150  # 2.5 минуты
+
 RECONNECT_MIN, RECONNECT_MAX = 3, 10
 STATE_FILE = "timer_state.json"
 
@@ -31,7 +34,10 @@ app.add_middleware(
 timer_end_ms: int = 0
 subscribers: List[asyncio.Queue] = []
 
-def now_ms() -> int: return int(time.time() * 1000)
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
 
 def load_state():
     global timer_end_ms
@@ -41,6 +47,7 @@ def load_state():
     except Exception:
         timer_end_ms = 0
 
+
 def save_state():
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -48,31 +55,37 @@ def save_state():
     except Exception:
         pass
 
+
 async def broadcast_state():
     state = {"type": "state", "end_ms": timer_end_ms, "server_ts": now_ms()}
     dead = []
     for q in subscribers:
-        try: await q.put(state)
-        except Exception: dead.append(q)
+        try:
+            await q.put(state)
+        except Exception:
+            dead.append(q)
     for q in dead:
-        if q in subscribers: subscribers.remove(q)
+        if q in subscribers:
+            subscribers.remove(q)
+
 
 def add_time_for_amount_rub(amount_rub: float) -> int:
     steps = int(max(0.0, amount_rub) // RUB_PER_STEP)
     return steps * SECONDS_PER_STEP
 
+
 async def apply_donation_rub(amount_rub: float, who: str = "", message: str = ""):
     global timer_end_ms
     add_sec = add_time_for_amount_rub(amount_rub)
     if add_sec <= 0:
-        logging.info("Донат от %s на %.2f RUB — +0 сек (меньше 1000).", who or "—", amount_rub)
+        logging.info("Донат от %s на %.2f RUB — +0 сек.", who or "—", amount_rub)
         return
     base = max(timer_end_ms, now_ms())
     timer_end_ms = base + add_sec * 1000
     save_state()
-    logging.info("🎉 TIMER +%ds (%.2f RUB) от %s — %s; new_end=%d",
-                 add_sec, amount_rub, who or "—", message or "", timer_end_ms)
+    logging.info("🎉 TIMER +%ds (%.2f RUB) от %s — %s", add_sec, amount_rub, who or "—", message or "")
     await broadcast_state()
+
 
 @app.get("/overlay", response_class=HTMLResponse)
 async def overlay() -> str:
@@ -82,68 +95,87 @@ async def overlay() -> str:
 <title>Timer Overlay</title>
 <style>
   html,body{margin:0;padding:0;background:transparent}
-  body{font-family:Inter,system-ui,Segoe UI,Arial; color:#fff}
+  body{font-family:Inter,system-ui,Segoe UI,Arial;color:#fff}
+
   .wrap{
-    width:800px;height:180px;box-sizing:border-box;
     display:flex;flex-direction:column;align-items:center;justify-content:center;
-    background:rgba(12,12,12,0.60);backdrop-filter:blur(6px);border-radius:16px;
-    box-shadow:0 8px 40px rgba(0,0,0,0.35);
+    padding:8px 18px;background:transparent;
   }
-  .rule{font-size:22px;opacity:.95;letter-spacing:.2px}
-  .timer{margin-top:6px;font-weight:800;font-size:64px;line-height:1}
+
+  .rule{
+    font-size:26px;font-weight:600;opacity:.98;white-space:nowrap;
+    text-shadow:0 0 6px rgba(0,0,0,0.7);
+  }
+
+  .timer{
+    margin-top:4px;font-weight:900;font-size:82px;line-height:1;
+    display:flex;align-items:center;justify-content:center;gap:0;
+    text-shadow:0 0 10px rgba(0,0,0,0.9);
+  }
+
+  .timer-emoji{font-size:0.9em}
+  .timer-value{line-height:1}
 </style>
 </head><body>
   <div class="wrap">
-    <div class="rule">Каждая 1000 руб = Спускаемся +5 минут</div>
-    <div class="timer" id="tm">00:00</div>
+    <div class="rule">Каждые 500 руб = Спуск +2.5 минуты</div>
+    <div class="timer">
+      <span class="timer-emoji">⛰️</span>
+      <span id="tm" class="timer-value">00:00</span>
+      <span class="timer-emoji">⛰️</span>
+    </div>
   </div>
+
 <script>
 let endMs = 0;
 let driftCorr = 0;
 
 function fmt(t){
-  t = Math.max(0, Math.floor(t));
-  const h = Math.floor(t/3600);
-  const m = Math.floor((t%3600)/60);
-  const s = t%60;
-  const pad = n => n<10 ? "0"+n : ""+n;
-  return h>0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+  t=Math.max(0,Math.floor(t));
+  const h=Math.floor(t/3600);
+  const m=Math.floor((t%3600)/60);
+  const s=t%60;
+  const pad=n=>n<10?"0"+n:""+n;
+  return h>0?`${pad(h)}:${pad(m)}:${pad(s)}`:`${pad(m)}:${pad(s)}`;
 }
 
 function tick(){
-  const el = document.getElementById('tm');
-  if (!endMs){ el.textContent = "00:00"; return requestAnimationFrame(tick); }
-  const now = Date.now() + driftCorr;
-  const left = Math.max(0, Math.round((endMs - now)/1000));
-  el.textContent = fmt(left);
+  const el=document.getElementById('tm');
+  if(!endMs){ el.textContent="00:00"; return requestAnimationFrame(tick); }
+  const now=Date.now()+driftCorr;
+  const left=Math.max(0,Math.round((endMs-now)/1000));
+  el.textContent=fmt(left);
   requestAnimationFrame(tick);
 }
 
 function connect(){
-  const es = new EventSource('/stream');
-  es.onmessage = ev => {
+  const es=new EventSource('/stream');
+  es.onmessage=ev=>{
     try{
-      const data = JSON.parse(ev.data);
-      if (data && data.type === 'state'){
-        endMs = Number(data.end_ms) || 0;           // без |0 — иначе 32-бит срез
-        if (data.server_ts) { driftCorr = Number(data.server_ts) - Date.now(); }
+      const data=JSON.parse(ev.data);
+      if(data.type==="state"){
+        endMs=Number(data.end_ms)||0;
+        if(data.server_ts) driftCorr=data.server_ts-Date.now();
       }
     }catch(e){}
   };
-  es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+  es.onerror=()=>{es.close();setTimeout(connect,2000);};
 }
 connect();
 tick();
 </script>
+
 </body></html>
     """
 
+
 @app.get("/stream")
 async def stream() -> StreamingResponse:
-    q: asyncio.Queue = asyncio.Queue()
+    q = asyncio.Queue()
     subscribers.append(q)
-    async def gen() -> AsyncGenerator[str, None]:
-        yield "data: " + json.dumps({"type":"state","end_ms": timer_end_ms, "server_ts": now_ms()}, ensure_ascii=False) + "\n\n"
+
+    async def gen():
+        yield "data: " + json.dumps({"type":"state","end_ms":timer_end_ms,"server_ts":now_ms()}, ensure_ascii=False) + "\n\n"
         try:
             while True:
                 evt = await q.get()
@@ -152,89 +184,92 @@ async def stream() -> StreamingResponse:
             pass
         finally:
             if q in subscribers: subscribers.remove(q)
-    headers = {
-        "Cache-Control": "no-cache",
-        "Content-Type": "text/event-stream",
-        "Connection": "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-    }
-    return StreamingResponse(gen(), headers=headers)
 
-def extract_amount_rub(it: Dict[str, Any]) -> float:
-    for key in ("amount_main", "amount_in_user_currency", "amount", "sum"):
-        v = it.get(key)
+    return StreamingResponse(gen(), headers={
+        "Cache-Control":"no-cache",
+        "Content-Type":"text/event-stream",
+        "Connection":"keep-alive",
+        "Access-Control-Allow-Origin":"*"
+    })
+
+
+def extract_amount_rub(it):
+    for key in ("amount_main","amount_in_user_currency","amount","sum"):
         try:
-            if v is not None:
-                return float(v)
-        except Exception:
-            continue
+            if it.get(key) is not None:
+                return float(it.get(key))
+        except: pass
     return 0.0
 
-async def centrifugo_connect_and_subscribe(socket_token: str, user_id: int, client_http: httpx.AsyncClient):
-    channel_name = f"$alerts:donation_{user_id}"
+
+async def centrifugo_connect_and_subscribe(socket_token, user_id, client_http):
+    channel_name=f"$alerts:donation_{user_id}"
+
     async with websockets.connect(CENTRIFUGO_WS, ping_interval=20, ping_timeout=20) as ws:
-        await ws.send(json.dumps({"params": {"token": socket_token}, "id": 1}))
-        msg = json.loads(await ws.recv())
-        client_id = (msg.get("result") or {}).get("client")
+        await ws.send(json.dumps({"params":{"token":socket_token},"id":1}))
+        msg=json.loads(await ws.recv())
+        client_id=(msg.get("result") or {}).get("client")
         if not client_id:
-            raise RuntimeError(f"Не получили client_id: {msg}")
+            raise RuntimeError("нет client_id", msg)
 
-        sub_req = {"channels": [channel_name], "client": client_id}
-        resp = await client_http.post(f"{API_BASE}/centrifuge/subscribe", json=sub_req)
+        sub_req={"channels":[channel_name],"client":client_id}
+        resp=await client_http.post(f"{API_BASE}/centrifuge/subscribe",json=sub_req)
         resp.raise_for_status()
-        channel_token = ((resp.json() or {}).get("channels") or [{}])[0].get("token")
+        channel_token=((resp.json() or {}).get("channels") or [{}])[0].get("token")
         if not channel_token:
-            raise RuntimeError(f"Нет token для канала {channel_name}: {resp.text}")
+            raise RuntimeError("нет токена канала")
 
-        await ws.send(json.dumps({"params": {"channel": channel_name, "token": channel_token}, "method": 1, "id": 2}))
-        logging.info("✅ Подписан на %s, слушаю донаты…", channel_name)
+        await ws.send(json.dumps({"params":{"channel":channel_name,"token":channel_token},"method":1,"id":2}))
+        logging.info("Подписан на %s", channel_name)
 
         async for raw in ws:
-            try:
-                data = json.loads(raw)
-            except Exception:
-                continue
-            pub = (data.get("result") or {}).get("publication") or data.get("publication")
-            payload = pub.get("data") if isinstance(pub, dict) else None
+            try: data=json.loads(raw)
+            except: continue
+
+            pub=(data.get("result") or {}).get("publication") or data.get("publication")
+            payload=pub.get("data") if isinstance(pub,dict) else None
+
             if payload is None:
-                rdata = (data.get("result") or {}).get("data")
-                if isinstance(rdata, dict) and "data" in rdata:
-                    payload = rdata["data"]
-            if payload is None:
-                continue
-            items = payload if isinstance(payload, list) else [payload]
+                rdata=(data.get("result") or {}).get("data")
+                if isinstance(rdata,dict) and "data" in rdata:
+                    payload=rdata["data"]
+            if payload is None: continue
+
+            items = payload if isinstance(payload,list) else [payload]
             for it in items:
-                if not isinstance(it, dict): continue
-                if not any(k in it for k in ("username","name","nickname","message","comment","text","amount_main","amount_in_user_currency","amount","sum")):
-                    continue
+                if not isinstance(it,dict): continue
                 who = it.get("username") or it.get("name") or (it.get("recipient") or {}).get("name") or "—"
                 msg_ = it.get("message") or it.get("comment") or it.get("text") or ""
-                amount_rub = extract_amount_rub(it)
-                await apply_donation_rub(amount_rub, who=who, message=msg_)
+                amount = extract_amount_rub(it)
+                await apply_donation_rub(amount, who, msg_)
+
 
 async def da_loop():
     if not DA_TOKEN:
-        logging.info("DA_TOKEN не задан — realtime отключён.")
+        logging.info("DA_TOKEN отсутствует!")
         return
-    headers = {"Authorization": f"Bearer {DA_TOKEN}", "Content-Type": "application/json"}
+
+    headers={"Authorization":f"Bearer {DA_TOKEN}","Content-Type":"application/json"}
     async with httpx.AsyncClient(headers=headers, timeout=20.0) as client:
         while True:
             try:
-                r = await client.get(f"{API_BASE}/user/oauth")
+                r=await client.get(f"{API_BASE}/user/oauth")
                 r.raise_for_status()
-                u = r.json().get("data") or {}
-                user_id = int(u["id"])
-                socket_token = u["socket_connection_token"]
-                await centrifugo_connect_and_subscribe(socket_token, user_id, client)
+                u=r.json().get("data") or {}
+                user_id=int(u["id"])
+                socket_token=u["socket_connection_token"]
+                await centrifugo_connect_and_subscribe(socket_token,user_id,client)
             except Exception as e:
-                logging.warning("Realtime ошибка: %s", e)
-            delay = random.uniform(RECONNECT_MIN, RECONNECT_MAX)
-            logging.info("Переподключение через %.1f с.", delay)
+                logging.warning("Ошибка realtime: %s", e)
+            delay=random.uniform(RECONNECT_MIN,RECONNECT_MAX)
+            logging.info("Переподключение через %.1f c.", delay)
             await asyncio.sleep(delay)
+
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "ts": int(time.time())}
+    return {"ok":True,"ts":now_ms()}
+
 
 @app.on_event("startup")
 async def on_start():
@@ -242,7 +277,8 @@ async def on_start():
     await broadcast_state()
     asyncio.create_task(da_loop())
 
-if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("main:app", host=host, port=port, reload=False, timeout_graceful_shutdown=0, timeout_keep_alive=75)
+
+if __name__=="__main__":
+    host=os.getenv("HOST","0.0.0.0")
+    port=int(os.getenv("PORT","8000"))
+    uvicorn.run("main:app",host=host,port=port,reload=False,timeout_keep_alive=75)
